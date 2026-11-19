@@ -66,6 +66,7 @@ const showAccounts = ref(false);
 const accountBusy = ref(false);
 /** Login OAuth en curso: UI espera Google; se puede cancelar. */
 const loginWaiting = ref(false);
+let loginGeneration = 0;
 const browsers = ref<BrowserOption[]>([]);
 const browserId = ref("default");
 const windowFocused = ref(true);
@@ -415,6 +416,10 @@ async function onBrowserChange() {
 }
 
 async function onCancelLogin() {
+  // Liberar UI al instante; el backend corta la espera en <500ms.
+  loginGeneration += 1;
+  loginWaiting.value = false;
+  accountBusy.value = false;
   try {
     await cancelLogin();
   } catch {
@@ -425,21 +430,25 @@ async function onCancelLogin() {
 async function onAddAccount() {
   error.value = "";
   showAccounts.value = true;
+  const gen = ++loginGeneration;
   accountBusy.value = true;
   loginWaiting.value = true;
   try {
     await setBrowserPreference(browserId.value);
     const token = await loginGoogle();
+    if (gen !== loginGeneration) return;
     showAccounts.value = false;
     emit("sessionChanged", token);
   } catch (e) {
     const msg = String(e);
-    if (!msg.toLowerCase().includes("cancelado")) {
+    if (gen === loginGeneration && !msg.toLowerCase().includes("cancelado")) {
       error.value = msg;
     }
   } finally {
-    loginWaiting.value = false;
-    accountBusy.value = false;
+    if (gen === loginGeneration) {
+      loginWaiting.value = false;
+      accountBusy.value = false;
+    }
   }
 }
 
@@ -536,10 +545,17 @@ onUnmounted(() => {
         <button
           class="tc-btn tc-btn-ghost"
           type="button"
-          :disabled="accountBusy"
-          @click="onLogout"
+          :disabled="accountBusy && !loginWaiting"
+          @click="loginWaiting ? onCancelLogin() : onLogout()"
         >
-          Salir
+          {{ loginWaiting ? "Cancelar" : "Salir" }}
+        </button>
+      </div>
+
+      <div v-if="loginWaiting" class="tc-login-waiting-bar">
+        <span>Esperando Google en el navegador…</span>
+        <button class="tc-btn tc-btn-light" type="button" @click="onCancelLogin">
+          Cancelar
         </button>
       </div>
 

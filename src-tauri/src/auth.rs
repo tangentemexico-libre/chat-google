@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 use tiny_http::{Response, Server};
 use url::Url;
@@ -25,9 +25,11 @@ const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/directory.readonly",
 ];
 
-/// Loopback local; Google Desktop acepta localhost/127.0.0.1 con puerto.
+/// Loopback IPv4 fijo (evita que "localhost" escuche solo en ::1 y el cancel no llegue).
 const OAUTH_PORT: u16 = 42813;
-const OAUTH_HOST: &str = "localhost";
+const OAUTH_HOST: &str = "127.0.0.1";
+
+static OAUTH_CANCEL: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize)]
 struct Installed {
@@ -414,100 +416,86 @@ pub async fn ensure_access_token(app: &AppHandle) -> Result<TokenInfo, String> {
     Ok(tokens)
 }
 
-/// Desbloquea el servidor loopback (cancela espera o libera puerto tras timeout).
+/// Cancela el login en curso (la espera OAuth revisa esta bandera cada ~400ms).
 pub fn cancel_pending_login() -> Result<(), String> {
-    use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpStream};
-    // 127.0.0.1 llega al mismo listener que "localhost".
-    let addr = SocketAddr::from(([127, 0, 0, 1], OAUTH_PORT));
-    match TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
-        Ok(mut stream) => {
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-            let req = concat!(
-                "GET /?error=access_denied&state=cancel HTTP/1.0\r\n",
-                "Host: localhost\r\n",
-                "Connection: close\r\n\r\n"
-            );
-            let _ = stream.write_all(req.as_bytes());
-            let _ = stream.flush();
-            let mut buf = [0u8; 64];
-            let _ = stream.read(&mut buf);
-            Ok(())
-        }
-        Err(_) => Ok(()), // no había login pendiente
-    }
+    OAUTH_CANCEL.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+fn respond_oauth_html(request: tiny_http::Request, cancelled: bool) {
+    let html = if cancelled {
+        "<html><body style='font-family:Segoe UI,sans-serif;padding:2rem'><h2>Cancelado</h2><p>Puedes cerrar esta ventana.</p></body></html>"
+    } else {
+        "<html><body style='font-family:Segoe UI,sans-serif;padding:2rem'><h2>Listo</h2><p>Ya puedes cerrar esta ventana y volver a Tangente Chat.</p></body></html>"
+    };
+    let _ = request.respond(Response::from_string(html).with_header(
+        "Content-Type: text/html; charset=utf-8"
+            .parse::<tiny_http::Header>()
+            .unwrap(),
+    ));
 }
 
 fn wait_for_oauth_code_blocking(port: u16) -> Result<(String, String), String> {
     let server = Server::http(format!("{OAUTH_HOST}:{port}")).map_err(|e| {
         format!(
-            "No se pudo abrir el puerto local {port}: {e}. Si cancelaste un login anterior, pulsa Cancelar login o espera un momento e inténtalo de nuevo."
+            "No se pudo abrir el puerto local {port}: {e}. Pulsa Cancelar e inténtalo de nuevo."
         )
     })?;
 
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || match server.recv() {
-        Ok(request) => {
-            let url = format!("http://{OAUTH_HOST}{}", request.url());
-            let parsed = Url::parse(&url).ok();
-            let error = parsed.as_ref().and_then(|u| {
-                u.query_pairs()
-                    .find(|(k, _)| k == "error")
-                    .map(|(_, v)| v.to_string())
-            });
-            let code = parsed.as_ref().and_then(|u| {
-                u.query_pairs()
-                    .find(|(k, _)| k == "code")
-                    .map(|(_, v)| v.to_string())
-            });
-            let state = parsed.as_ref().and_then(|u| {
-                u.query_pairs()
-                    .find(|(k, _)| k == "state")
-                    .map(|(_, v)| v.to_string())
-            });
-            let html = if error.is_some() {
-                "<html><body style='font-family:Segoe UI,sans-serif;padding:2rem'><h2>Cancelado</h2><p>Puedes cerrar esta ventana.</p></body></html>"
-            } else {
-                "<html><body style='font-family:Segoe UI,sans-serif;padding:2rem'><h2>Listo</h2><p>Ya puedes cerrar esta ventana y volver a Tangente Chat.</p></body></html>"
-            };
-            let _ = request.respond(Response::from_string(html).with_header(
-                "Content-Type: text/html; charset=utf-8"
-                    .parse::<tiny_http::Header>()
-                    .unwrap(),
-            ));
-            if let Some(err) = error {
-                let _ = tx.send(Err(if err == "access_denied" {
-                    "Login cancelado.".into()
-                } else {
-                    format!("Google rechazó el login: {err}")
-                }));
-            } else {
-                let _ = tx.send(Ok((code, state)));
-            }
-        }
-        Err(e) => {
-            let _ = tx.send(Err(e.to_string()));
-        }
-    });
+    let deadline = Instant::now() + Duration::from_secs(180);
 
-    match rx.recv_timeout(Duration::from_secs(180)) {
-        Ok(Ok((Some(code), state))) => Ok((code, state.unwrap_or_default())),
-        Ok(Ok((None, _))) => Err("Google no devolvió authorization code".into()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => {
-            // Libera el puerto: el hilo del servidor sigue en recv() hasta recibir algo.
-            let _ = cancel_pending_login();
-            Err("Tiempo de espera agotado en el login de Google (3 min)".into())
+    loop {
+        if OAUTH_CANCEL.load(Ordering::SeqCst) {
+            return Err("Login cancelado.".into());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Tiempo de espera agotado en el login de Google (3 min)".into());
+        }
+        let slice = remaining.min(Duration::from_millis(400));
+        match server.recv_timeout(slice) {
+            Ok(Some(request)) => {
+                let url = format!("http://{OAUTH_HOST}{}", request.url());
+                let parsed = Url::parse(&url).ok();
+                let error = parsed.as_ref().and_then(|u| {
+                    u.query_pairs()
+                        .find(|(k, _)| k == "error")
+                        .map(|(_, v)| v.to_string())
+                });
+                let code = parsed.as_ref().and_then(|u| {
+                    u.query_pairs()
+                        .find(|(k, _)| k == "code")
+                        .map(|(_, v)| v.to_string())
+                });
+                let state = parsed.as_ref().and_then(|u| {
+                    u.query_pairs()
+                        .find(|(k, _)| k == "state")
+                        .map(|(_, v)| v.to_string())
+                });
+
+                if let Some(err) = error {
+                    respond_oauth_html(request, true);
+                    return Err(if err == "access_denied" {
+                        "Login cancelado.".into()
+                    } else {
+                        format!("Google rechazó el login: {err}")
+                    });
+                }
+
+                respond_oauth_html(request, false);
+                return match code {
+                    Some(code) => Ok((code, state.unwrap_or_default())),
+                    None => Err("Google no devolvió authorization code".into()),
+                };
+            }
+            Ok(None) => continue,
+            Err(e) => return Err(e.to_string()),
         }
     }
 }
 
 pub async fn login_with_google(app: AppHandle) -> Result<TokenInfo, String> {
-    // Por si quedó un login anterior colgado ocupando el puerto.
-    let _ = cancel_pending_login();
-    // Pequeña pausa para que el SO suelte el bind.
-    std::thread::sleep(Duration::from_millis(150));
+    OAUTH_CANCEL.store(false, Ordering::SeqCst);
 
     let client = load_oauth_client(&app)?;
     let (verifier, challenge) = pkce_pair();
@@ -538,7 +526,7 @@ pub async fn login_with_google(app: AppHandle) -> Result<TokenInfo, String> {
         tauri::async_runtime::spawn_blocking(move || wait_for_oauth_code_blocking(OAUTH_PORT));
     std::thread::sleep(Duration::from_millis(120));
     if let Err(e) = crate::browser::open_url_with_preferred_browser(&app, &auth_url) {
-        let _ = cancel_pending_login();
+        OAUTH_CANCEL.store(true, Ordering::SeqCst);
         let _ = wait_task.await;
         return Err(e);
     }

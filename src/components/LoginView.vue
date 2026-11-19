@@ -63,10 +63,11 @@ async function login() {
   try {
     await setBrowserPreference(browserId.value);
     const token = await loginGoogle();
+    if (!loading.value) return; // cancelaron
     emit("loggedIn", token);
   } catch (e) {
     const msg = String(e);
-    if (!msg.toLowerCase().includes("cancelado")) {
+    if (loading.value && !msg.toLowerCase().includes("cancelado")) {
       error.value = msg;
     }
   } finally {
@@ -75,6 +76,7 @@ async function login() {
 }
 
 async function onCancelLogin() {
+  loading.value = false;
   try {
     await cancelLogin();
   } catch {

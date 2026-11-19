@@ -244,6 +244,19 @@ button:disabled {
   color: #fff;
 }
 
+.tc-login-waiting-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.55rem 0.75rem 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  background: rgba(47, 111, 237, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 0.78rem;
+}
+
 .tc-account-browser-label {
   display: block;
   margin: 0.45rem 0.15rem 0.25rem;

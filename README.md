@@ -7,7 +7,7 @@ UI propia + Google Chat API — no es un wrapper del navegador.
 
 **Licencia / uso:** código abierto para que cualquiera pueda construir el suyo. Cada quien debe crear **su propio** proyecto en Google Cloud y sus propias credenciales OAuth. **No hay secretos en este repositorio.**
 
-## Qué incluye (v0.1.7)
+## Qué incluye (v0.1.8)
 
 - Login OAuth Desktop (PKCE) con el navegador que elijas
 - Espacios, DMs, envío de texto
@@ -55,7 +55,7 @@ Plantilla (placeholders, sin secretos reales): [`docs/google-oauth.client.json.e
 7. Redirect loopback que usa la app:
 
 ```text
-http://localhost:42813
+http://127.0.0.1:42813
 ```
 
 En clientes Desktop Google suele aceptar loopback. Si el login falla por redirect, revisa que el JSON sea tipo Desktop.
