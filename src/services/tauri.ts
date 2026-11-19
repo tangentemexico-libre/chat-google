@@ -58,6 +58,11 @@ export function loginGoogle() {
   return invoke<TokenInfo>("login_google");
 }
 
+/** Cancela un login OAuth en espera (libera el puerto y desbloquea la UI). */
+export function cancelLogin() {
+  return invoke<void>("cancel_login");
+}
+
 export function listAccounts() {
   return invoke<AccountSummary[]>("list_accounts");
 }

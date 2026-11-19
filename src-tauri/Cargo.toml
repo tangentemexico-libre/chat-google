@@ -1,6 +1,6 @@
 [package]
 name = "tangente-chat"
-version = "0.1.6"
+version = "0.1.7"
 description = "Cliente de escritorio para Google Chat"
 authors = ["Tangente"]
 edition = "2021"

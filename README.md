@@ -7,7 +7,7 @@ UI propia + Google Chat API — no es un wrapper del navegador.
 
 **Licencia / uso:** código abierto para que cualquiera pueda construir el suyo. Cada quien debe crear **su propio** proyecto en Google Cloud y sus propias credenciales OAuth. **No hay secretos en este repositorio.**
 
-## Qué incluye (v0.1.6)
+## Qué incluye (v0.1.7)
 
 - Login OAuth Desktop (PKCE) con el navegador que elijas
 - Espacios, DMs, envío de texto

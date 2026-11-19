@@ -30,6 +30,11 @@ async fn login_google(app: tauri::AppHandle) -> Result<TokenInfo, String> {
 }
 
 #[tauri::command]
+fn cancel_login() -> Result<(), String> {
+    auth::cancel_pending_login()
+}
+
+#[tauri::command]
 fn list_browsers(app: tauri::AppHandle) -> Vec<browser::BrowserOption> {
     browser::list_browsers(&app)
 }
@@ -227,6 +232,7 @@ pub fn run() {
             auth_status,
             credentials_status,
             login_google,
+            cancel_login,
             list_accounts,
             switch_account,
             remove_account,

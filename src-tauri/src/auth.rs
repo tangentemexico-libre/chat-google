@@ -414,15 +414,48 @@ pub async fn ensure_access_token(app: &AppHandle) -> Result<TokenInfo, String> {
     Ok(tokens)
 }
 
+/// Desbloquea el servidor loopback (cancela espera o libera puerto tras timeout).
+pub fn cancel_pending_login() -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    // 127.0.0.1 llega al mismo listener que "localhost".
+    let addr = SocketAddr::from(([127, 0, 0, 1], OAUTH_PORT));
+    match TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
+        Ok(mut stream) => {
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            let req = concat!(
+                "GET /?error=access_denied&state=cancel HTTP/1.0\r\n",
+                "Host: localhost\r\n",
+                "Connection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(req.as_bytes());
+            let _ = stream.flush();
+            let mut buf = [0u8; 64];
+            let _ = stream.read(&mut buf);
+            Ok(())
+        }
+        Err(_) => Ok(()), // no había login pendiente
+    }
+}
+
 fn wait_for_oauth_code_blocking(port: u16) -> Result<(String, String), String> {
-    let server = Server::http(format!("{OAUTH_HOST}:{port}"))
-        .map_err(|e| format!("No se pudo abrir el puerto local {port}: {e}"))?;
+    let server = Server::http(format!("{OAUTH_HOST}:{port}")).map_err(|e| {
+        format!(
+            "No se pudo abrir el puerto local {port}: {e}. Si cancelaste un login anterior, pulsa Cancelar login o espera un momento e inténtalo de nuevo."
+        )
+    })?;
 
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || match server.recv() {
         Ok(request) => {
             let url = format!("http://{OAUTH_HOST}{}", request.url());
             let parsed = Url::parse(&url).ok();
+            let error = parsed.as_ref().and_then(|u| {
+                u.query_pairs()
+                    .find(|(k, _)| k == "error")
+                    .map(|(_, v)| v.to_string())
+            });
             let code = parsed.as_ref().and_then(|u| {
                 u.query_pairs()
                     .find(|(k, _)| k == "code")
@@ -433,13 +466,25 @@ fn wait_for_oauth_code_blocking(port: u16) -> Result<(String, String), String> {
                     .find(|(k, _)| k == "state")
                     .map(|(_, v)| v.to_string())
             });
-            let html = "<html><body style='font-family:Segoe UI,sans-serif;padding:2rem'><h2>Listo</h2><p>Ya puedes cerrar esta ventana y volver a Tangente Chat.</p></body></html>";
+            let html = if error.is_some() {
+                "<html><body style='font-family:Segoe UI,sans-serif;padding:2rem'><h2>Cancelado</h2><p>Puedes cerrar esta ventana.</p></body></html>"
+            } else {
+                "<html><body style='font-family:Segoe UI,sans-serif;padding:2rem'><h2>Listo</h2><p>Ya puedes cerrar esta ventana y volver a Tangente Chat.</p></body></html>"
+            };
             let _ = request.respond(Response::from_string(html).with_header(
                 "Content-Type: text/html; charset=utf-8"
                     .parse::<tiny_http::Header>()
                     .unwrap(),
             ));
-            let _ = tx.send(Ok((code, state)));
+            if let Some(err) = error {
+                let _ = tx.send(Err(if err == "access_denied" {
+                    "Login cancelado.".into()
+                } else {
+                    format!("Google rechazó el login: {err}")
+                }));
+            } else {
+                let _ = tx.send(Ok((code, state)));
+            }
         }
         Err(e) => {
             let _ = tx.send(Err(e.to_string()));
@@ -450,11 +495,20 @@ fn wait_for_oauth_code_blocking(port: u16) -> Result<(String, String), String> {
         Ok(Ok((Some(code), state))) => Ok((code, state.unwrap_or_default())),
         Ok(Ok((None, _))) => Err("Google no devolvió authorization code".into()),
         Ok(Err(e)) => Err(e),
-        Err(_) => Err("Tiempo de espera agotado en el login de Google (3 min)".into()),
+        Err(_) => {
+            // Libera el puerto: el hilo del servidor sigue en recv() hasta recibir algo.
+            let _ = cancel_pending_login();
+            Err("Tiempo de espera agotado en el login de Google (3 min)".into())
+        }
     }
 }
 
 pub async fn login_with_google(app: AppHandle) -> Result<TokenInfo, String> {
+    // Por si quedó un login anterior colgado ocupando el puerto.
+    let _ = cancel_pending_login();
+    // Pequeña pausa para que el SO suelte el bind.
+    std::thread::sleep(Duration::from_millis(150));
+
     let client = load_oauth_client(&app)?;
     let (verifier, challenge) = pkce_pair();
     let mut state_bytes = [0u8; 16];
@@ -477,13 +531,19 @@ pub async fn login_with_google(app: AppHandle) -> Result<TokenInfo, String> {
         q.append_pair("state", &state);
     }
 
-    crate::browser::open_url_with_preferred_browser(&app, auth.as_str())?;
-
     let app_handle = app.clone();
-    let (code, returned_state) =
-        tauri::async_runtime::spawn_blocking(move || wait_for_oauth_code_blocking(OAUTH_PORT))
-            .await
-            .map_err(|e| e.to_string())??;
+    let auth_url = auth.to_string();
+    // Arranca el loopback antes de abrir el navegador.
+    let wait_task =
+        tauri::async_runtime::spawn_blocking(move || wait_for_oauth_code_blocking(OAUTH_PORT));
+    std::thread::sleep(Duration::from_millis(120));
+    if let Err(e) = crate::browser::open_url_with_preferred_browser(&app, &auth_url) {
+        let _ = cancel_pending_login();
+        let _ = wait_task.await;
+        return Err(e);
+    }
+
+    let (code, returned_state) = wait_task.await.map_err(|e| e.to_string())??;
 
     if returned_state != state {
         return Err("State OAuth inválido (posible CSRF)".into());

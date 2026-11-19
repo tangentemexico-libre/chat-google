@@ -9,7 +9,10 @@ import {
 import MessageAttachment from "./MessageAttachment.vue";
 import NewChatModal from "./NewChatModal.vue";
 import {
+  cancelLogin,
+  getBrowserPreference,
   listAccounts,
+  listBrowsers,
   listMessages,
   listSpaces,
   loginGoogle,
@@ -17,9 +20,11 @@ import {
   removeAccount,
   sendFileMessage,
   sendMessage,
+  setBrowserPreference,
   setUnreadAttention,
   switchAccount,
   type AccountSummary,
+  type BrowserOption,
   type MessageItem,
   type SpaceItem,
   type TokenInfo,
@@ -59,6 +64,10 @@ const showNewChat = ref(false);
 const accounts = ref<AccountSummary[]>([]);
 const showAccounts = ref(false);
 const accountBusy = ref(false);
+/** Login OAuth en curso: UI espera Google; se puede cancelar. */
+const loginWaiting = ref(false);
+const browsers = ref<BrowserOption[]>([]);
+const browserId = ref("default");
 const windowFocused = ref(true);
 const knownActivity = ref<Map<string, string>>(new Map());
 const activitySeeded = ref(false);
@@ -387,16 +396,49 @@ async function onSwitchAccount(email: string) {
   }
 }
 
-async function onAddAccount() {
-  error.value = "";
-  accountBusy.value = true;
-  showAccounts.value = false;
+async function loadBrowserOptions() {
   try {
-    const token = await loginGoogle();
-    emit("sessionChanged", token);
+    browsers.value = await listBrowsers();
+    const pref = await getBrowserPreference();
+    browserId.value = pref.browser_id || "default";
+  } catch {
+    browsers.value = [];
+  }
+}
+
+async function onBrowserChange() {
+  try {
+    await setBrowserPreference(browserId.value);
   } catch (e) {
     error.value = String(e);
+  }
+}
+
+async function onCancelLogin() {
+  try {
+    await cancelLogin();
+  } catch {
+    /* ignore */
+  }
+}
+
+async function onAddAccount() {
+  error.value = "";
+  showAccounts.value = true;
+  accountBusy.value = true;
+  loginWaiting.value = true;
+  try {
+    await setBrowserPreference(browserId.value);
+    const token = await loginGoogle();
+    showAccounts.value = false;
+    emit("sessionChanged", token);
+  } catch (e) {
+    const msg = String(e);
+    if (!msg.toLowerCase().includes("cancelado")) {
+      error.value = msg;
+    }
   } finally {
+    loginWaiting.value = false;
     accountBusy.value = false;
   }
 }
@@ -455,7 +497,7 @@ onMounted(async () => {
     windowFocused.value = true;
   }
 
-  await Promise.all([refreshSpaces(), refreshAccounts()]);
+  await Promise.all([refreshSpaces(), refreshAccounts(), loadBrowserOptions()]);
   spacesTimer = window.setInterval(() => {
     void refreshSpaces();
   }, 30000);
@@ -467,6 +509,7 @@ onUnmounted(() => {
   unlistenFocus?.();
   clearPendingFile();
   void clearUnread();
+  if (loginWaiting.value) void cancelLogin();
 });
 </script>
 
@@ -529,14 +572,43 @@ onUnmounted(() => {
             ×
           </button>
         </button>
+        <label class="tc-account-browser-label" for="account-browser-select">
+          Navegador para agregar cuenta
+        </label>
+        <select
+          id="account-browser-select"
+          v-model="browserId"
+          class="tc-account-browser"
+          :disabled="loginWaiting"
+          @change="onBrowserChange"
+        >
+          <option
+            v-for="b in browsers"
+            :key="b.id"
+            :value="b.id"
+            :disabled="!b.available"
+          >
+            {{ b.name }}{{ b.available ? "" : " (no instalado)" }}
+          </option>
+        </select>
+        <p class="tc-account-hint">
+          Elige el navegador donde ya tienes esa cuenta de Google iniciada.
+        </p>
         <button
+          v-if="!loginWaiting"
           class="tc-account-add"
           type="button"
           :disabled="accountBusy"
           @click="onAddAccount"
         >
-          {{ accountBusy ? "Esperando Google…" : "+ Agregar cuenta" }}
+          + Agregar cuenta
         </button>
+        <div v-else class="tc-account-waiting">
+          <span>Esperando Google…</span>
+          <button class="tc-btn tc-btn-light" type="button" @click="onCancelLogin">
+            Cancelar
+          </button>
+        </div>
       </div>
 
       <div class="tc-sidebar-actions">

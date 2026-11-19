@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import {
+  cancelLogin,
   credentialsStatus,
   getBrowserPreference,
   listBrowsers,
@@ -64,9 +65,20 @@ async function login() {
     const token = await loginGoogle();
     emit("loggedIn", token);
   } catch (e) {
-    error.value = String(e);
+    const msg = String(e);
+    if (!msg.toLowerCase().includes("cancelado")) {
+      error.value = msg;
+    }
   } finally {
     loading.value = false;
+  }
+}
+
+async function onCancelLogin() {
+  try {
+    await cancelLogin();
+  } catch {
+    /* ignore */
   }
 }
 </script>
@@ -128,6 +140,14 @@ async function login() {
         @click="login"
       >
         {{ loading ? "Esperando Google…" : "Iniciar sesión con Google" }}
+      </button>
+      <button
+        v-if="loading"
+        class="tc-btn tc-btn-light w-100 mt-2"
+        type="button"
+        @click="onCancelLogin"
+      >
+        Cancelar login
       </button>
 
       <div v-if="error" class="tc-alert error">{{ error }}</div>
