@@ -7,7 +7,7 @@ UI propia + Google Chat API — no es un wrapper del navegador.
 
 **Licencia / uso:** código abierto para que cualquiera pueda construir el suyo. Cada quien debe crear **su propio** proyecto en Google Cloud y sus propias credenciales OAuth. **No hay secretos en este repositorio.**
 
-## Qué incluye (v0.1.5)
+## Qué incluye (v0.1.6)
 
 - Login OAuth Desktop (PKCE) con el navegador que elijas
 - Espacios, DMs, envío de texto
@@ -69,6 +69,13 @@ En clientes Desktop Google suele aceptar loopback. Si el login falla por redirec
 - `contacts.readonly`, `contacts.other.readonly`, `directory.readonly`
 
 Si cambias scopes: **Salir** en la app y vuelve a iniciar sesión (consent otra vez).
+
+Si aparece *insufficient authentication scopes* / `ACCESS_TOKEN_SCOPE_INSUFFICIENT` al listar chats:
+
+1. En GCP → OAuth consent screen, agrega **todos** los scopes de arriba (Chat + People).
+2. Si el consent es **External** y está en Testing, agrega el correo como **test user**.
+3. En la app: **Salir** → iniciar sesión de nuevo y aceptar **todos** los permisos.
+4. En Workspace, un admin puede tener que permitir la app / los scopes de Chat.
 
 ## Desarrollo
 

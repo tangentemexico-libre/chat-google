@@ -27,6 +27,21 @@ pub struct MessageItem {
     pub attachment_resource: Option<String>,
 }
 
+fn format_chat_api_error(status: reqwest::StatusCode, body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    if lower.contains("access_token_scope_insufficient")
+        || lower.contains("insufficient authentication scopes")
+    {
+        return "Faltan permisos de Google Chat en esta sesión. Pulsa Salir, vuelve a iniciar sesión y acepta todos los permisos (espacios y mensajes). En Google Cloud, OAuth consent screen debe incluir los scopes de Chat; si el proyecto es External/Testing, agrega al usuario como test user.".into();
+    }
+    if status.as_u16() == 403 && lower.contains("permission_denied") {
+        return format!(
+            "Google Chat denegó el acceso (403). Revisa que la cuenta tenga Google Chat y que la app esté configurada en GCP. Detalle: {body}"
+        );
+    }
+    format!("Chat API {status}: {body}")
+}
+
 async fn chat_get(app: &AppHandle, path: &str) -> Result<Value, String> {
     let tokens = ensure_access_token(app).await?;
     let url = format!("https://chat.googleapis.com/v1{path}");
@@ -41,7 +56,7 @@ async fn chat_get(app: &AppHandle, path: &str) -> Result<Value, String> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Chat API {status}: {body}"));
+        return Err(format_chat_api_error(status, &body));
     }
     resp.json().await.map_err(|e| e.to_string())
 }
@@ -61,7 +76,7 @@ async fn chat_post(app: &AppHandle, path: &str, body: Value) -> Result<Value, St
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Chat API {status}: {body}"));
+        return Err(format_chat_api_error(status, &body));
     }
     resp.json().await.map_err(|e| e.to_string())
 }
